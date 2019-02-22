@@ -1,0 +1,128 @@
+---
+- name: Deploy azure resource manager group
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  tags:
+    - azure
+
+  pre_tasks:
+
+  - name: "stat {{ ssh_key_user }} for private key"
+    stat:
+      path: "~/.ssh/{{ ssh_key_user }}_id_rsa"
+    register: id_rsa  
+    tags:
+      - ssh_key
+
+  - name: Generate SSH keys
+    command: "ssh-keygen -b 2048 -t rsa -f ~/.ssh/{{ ssh_key_user }}_id_rsa -q -N ''"
+    args:
+      creates: "~/.ssh/{{ ssh_key_user }}id_rsa"
+    when: id_rsa.stat.exists == false
+    tags:
+      - ssh_key
+
+  roles:
+
+  - name: azure VM provisioning
+    role: azure_rm_group
+    tags:
+      - azure
+      - deploy
+
+  post_tasks:
+
+  - name: deployment variable
+    debug:
+      var: azure_deployment
+      verbosity: "{{ verbosity_level }}"
+
+  - name: refresh the inventory
+    meta: refresh_inventory
+    tags:
+      - azure
+      - inventory
+
+  - name: display groups
+    debug:
+      var: groups
+      verbosity: "{{ verbosity_level }}"
+
+- name:  Deploy server roles
+  hosts: role_ansible:role_jumphost:role_docker
+  strategy: free
+  tags:
+    - azure
+    - awx
+    - docker
+
+  pre_tasks:
+
+  - name: wait for VMs
+    wait_for_connection:
+      timeout: 300
+
+  tasks:
+
+  - import_tasks: ansible-awx.yml
+    when: "'role_ansible' in group_names"
+    tags:
+      - awx-config
+      - azure-dns
+
+  - import_tasks: docker.yml
+    when: "'role_docker' in group_names"
+    tags:
+      - docker-config
+
+  - import_tasks: jumphost.yml
+    when: "'role_jumphost' in group_names"
+    tags:
+      - jumphost-config
+
+- name: Update Azure DNS
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tags:
+    - azure-dns
+
+  tasks:
+
+  - name: set azure DNS TXT record
+    block:
+
+    - name: set DNS fact
+      set_fact:
+        demorest_dns_txt_value: "{{ hostvars[groups['role_ansible'][0]]['awx_base64_user_credential'] }}"
+
+    - name: create DNS facts
+      set_fact:
+        az_dnsrecords: "{{ { 'records': [ {'entry': demorest_dns_txt_value} ] } }}"
+
+    - name: debug demorest_dns_txt_value
+      debug:
+        var: demorest_dns_txt_value
+
+    - name: set DNS TXT record
+      azure_rm_dnsrecordset:
+        resource_group: "{{ az_dns_resource_group }}"
+        zone_name: "{{ az_dnsrecordset_zone_name }}"
+        state: present
+        relative_name: "{{ az_dnsrecordset_relative_name }}"
+        record_type: "{{ az_dnsrecordset_record_type }}"
+        records: "{{ az_dnsrecords.records }}"
+      register: azure_dnsrecordset
+      when: demorest_dns_txt_value is defined
+      tags:
+        - azure-dns
+
+    - name: debug azure_dnsrecordset
+      debug:
+        var: azure_dnsrecordset
+        verbosity: "{{ verbosity_level }}"
+
+    when:
+      - az_dns_process_records is defined
+      - az_dns_process_records
